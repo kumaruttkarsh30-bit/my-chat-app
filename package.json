@@ -1,0 +1,12 @@
+{
+  "name": "my-chat-app",
+  "version": "1.0.0",
+  "main": "gemini-code-1777901785406.js",
+  "scripts": {
+    "start": "node gemini-code-1777901785406.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  }
+}
