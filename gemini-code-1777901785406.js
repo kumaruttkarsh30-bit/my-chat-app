@@ -5,10 +5,16 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+
+// maxHttpBufferSize badha diya hai taaki 50MB tak ki Photos/Videos ja sakein
+const io = new Server(server, { maxHttpBufferSize: 5e7 }); 
+
+// Server encrypted messages ko store karega (Offline messaging ke liye)
+// Note: Server ko sirf gibberish dikhega, password ke bina wo kuch nahi padh sakta.
+let messageHistory = [];
 
 // ==========================================
-// 1. FRONTEND: Premium Smooth UI + Military E2E
+// 1. FRONTEND: Secret Room RGB UI + Media + Offline Sync
 // ==========================================
 const frontendHTML = `
 <!DOCTYPE html>
@@ -16,111 +22,104 @@ const frontendHTML = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Private Chat</title>
+    <title>Secret E2EE Room</title>
     <script src="/socket.io/socket.io.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-main: #0f172a;
-            --bg-card: #1e293b;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --primary: #3b82f6;
-            --primary-hover: #2563eb;
-            --bubble-me: #3b82f6;
-            --bubble-friend: #334155;
-            --danger: #ef4444;
-            --success: #22c55e;
+            --bg-dark: #050505;
+            --room-dark: #0a0a0a;
+            --text-main: #e0e0e0;
+            --accent: #222;
         }
         * { box-sizing: border-box; }
         body {
-            font-family: 'Inter', sans-serif; background-color: var(--bg-main); color: var(--text-main);
-            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; padding: 20px;
+            font-family: 'Space Mono', monospace; background-color: var(--bg-dark); color: var(--text-main);
+            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; padding: 10px;
+            overflow: hidden;
         }
+
+        /* RGB Glowing Secret Room Effect */
+        @keyframes rgbGlow {
+            0% { box-shadow: 0 0 15px rgba(255, 0, 0, 0.2), inset 0 0 20px rgba(255, 0, 0, 0.05); border-color: rgba(255,0,0,0.3); }
+            33% { box-shadow: 0 0 15px rgba(0, 255, 0, 0.2), inset 0 0 20px rgba(0, 255, 0, 0.05); border-color: rgba(0,255,0,0.3); }
+            66% { box-shadow: 0 0 15px rgba(0, 150, 255, 0.2), inset 0 0 20px rgba(0, 150, 255, 0.05); border-color: rgba(0,150,255,0.3); }
+            100% { box-shadow: 0 0 15px rgba(255, 0, 255, 0.2), inset 0 0 20px rgba(255, 0, 255, 0.05); border-color: rgba(255,0,255,0.3); }
+        }
+
         .app-container {
-            width: 100%; max-width: 400px; background: var(--bg-card); border-radius: 24px;
-            box-shadow: 0 15px 35px rgba(0,0,0,0.4); overflow: hidden; display: flex; flex-direction: column;
-            height: 85vh; max-height: 750px; border: 1px solid rgba(255,255,255,0.05);
+            width: 100%; max-width: 450px; background: var(--room-dark); border-radius: 12px;
+            display: flex; flex-direction: column; height: 90vh; max-height: 800px;
+            border: 1px solid #333; animation: rgbGlow 6s infinite alternate; transition: filter 0.3s;
         }
+
+        /* Anti-Snoop Blur */
+        .blur-mode { filter: blur(15px) grayscale(100%); pointer-events: none; }
+
         .header {
-            padding: 20px; text-align: center; background: rgba(30, 41, 59, 0.95);
-            border-bottom: 1px solid rgba(255,255,255,0.05); z-index: 10;
+            padding: 15px; text-align: center; border-bottom: 1px solid #222; background: #000;
         }
-        .header h2 { margin: 0; font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 10px; }
-        .status-dot { width: 10px; height: 10px; background: var(--danger); border-radius: 50%; display: inline-block; box-shadow: 0 0 10px var(--danger); transition: 0.3s; }
-        .status-dot.safe { background: var(--success); box-shadow: 0 0 10px var(--success); }
-        .header p { margin: 5px 0 0; font-size: 0.8rem; color: var(--text-muted); }
+        .badge {
+            font-size: 0.65rem; color: #00ff00; border: 1px solid #00ff00; padding: 2px 6px;
+            border-radius: 4px; display: inline-block; margin-bottom: 5px; text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .header h2 { margin: 0; font-size: 1.1rem; color: #fff; font-weight: normal; }
 
-        /* Login / Setup Area */
-        #setup-area {
-            padding: 40px 30px; display: flex; flex-direction: column; gap: 20px; flex: 1; justify-content: center;
-            animation: fadeIn 0.5s ease;
+        #setup-area { padding: 40px 20px; text-align: center; display: flex; flex-direction: column; gap: 20px; flex: 1; justify-content: center; }
+        input[type="password"], input[type="text"] {
+            width: 100%; padding: 15px; border-radius: 8px; border: 1px solid #333;
+            background: #000; color: #00ff00; font-family: 'Space Mono', monospace; outline: none;
         }
-        .input-group label { font-size: 0.9rem; color: var(--text-muted); display: block; margin-bottom: 8px; }
-        input {
-            width: 100%; padding: 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1);
-            background: rgba(15, 23, 42, 0.5); color: white; font-size: 1rem; outline: none; transition: 0.3s; font-family: 'Inter', sans-serif;
-        }
-        input:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15); background: rgba(15, 23, 42, 0.8); }
+        input:focus { border-color: #555; }
         button {
-            width: 100%; padding: 16px; border-radius: 16px; border: none; background: var(--primary); color: white;
-            font-size: 1rem; font-weight: 600; cursor: pointer; transition: 0.2s; font-family: 'Inter', sans-serif;
+            padding: 15px; border-radius: 8px; border: 1px solid #444; background: #111; color: #fff;
+            cursor: pointer; font-family: 'Space Mono', monospace; transition: 0.3s;
         }
-        button:hover { background: var(--primary-hover); transform: translateY(-1px); }
-        button:active { transform: translateY(1px); }
+        button:hover { background: #333; }
 
-        /* Chat Area */
-        #chat-area { display: none; flex-direction: column; flex: 1; overflow: hidden; animation: fadeIn 0.4s ease; }
-        #chat-box {
-            flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
-            scroll-behavior: smooth;
-        }
-        #chat-box::-webkit-scrollbar { width: 5px; }
-        #chat-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+        #chat-area { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+        #chat-box { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
         
-        .msg { padding: 12px 18px; border-radius: 20px; max-width: 80%; word-wrap: break-word; font-size: 0.95rem; line-height: 1.4; animation: slideUp 0.3s ease; }
-        .my-msg { background: var(--bubble-me); align-self: flex-end; border-bottom-right-radius: 4px; }
-        .friend-msg { background: var(--bubble-friend); align-self: flex-start; border-bottom-left-radius: 4px; }
-        .system-msg { background: transparent; color: var(--text-muted); font-size: 0.8rem; align-self: center; text-align: center; margin: 10px 0; }
+        .msg { padding: 10px 15px; border-radius: 8px; max-width: 85%; font-size: 0.9rem; word-wrap: break-word; }
+        .my-msg { background: #1a1a1a; align-self: flex-end; border: 1px solid #333; border-right: 3px solid #00ff00; }
+        .friend-msg { background: #0f0f0f; align-self: flex-start; border: 1px solid #333; border-left: 3px solid #0015ff; }
+        .system-msg { color: #666; font-size: 0.75rem; align-self: center; text-align: center; }
 
-        .input-area { padding: 15px; background: var(--bg-card); border-top: 1px solid rgba(255,255,255,0.05); display: flex; gap: 10px; }
-        .input-area input { border-radius: 24px; padding: 14px 20px; margin: 0; }
-        .input-area button { width: auto; padding: 0 24px; border-radius: 24px; display: flex; align-items: center; justify-content: center; }
+        /* Media Styling */
+        .msg img, .msg video { max-width: 100%; border-radius: 4px; margin-top: 5px; border: 1px solid #333; }
 
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes slideUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+        .input-area { padding: 10px; background: #000; border-top: 1px solid #222; display: flex; gap: 8px; align-items: center; }
+        .input-area input[type="text"] { flex: 1; margin: 0; padding: 12px; }
+        
+        .file-upload-btn { background: transparent; border: none; font-size: 1.5rem; cursor: pointer; padding: 0 5px; color: #888; }
+        .file-upload-btn:hover { color: #fff; background: transparent;}
+        #file-input { display: none; }
     </style>
 </head>
 <body>
 
-<div class="app-container">
+<div class="app-container" id="app">
     <div class="header">
-        <h2><span id="status-dot" class="status-dot"></span> Private Room</h2>
-        <p id="status-text">Waiting for key...</p>
+        <div class="badge">🔒 End-to-End Encrypted</div>
+        <h2>Secret Room</h2>
     </div>
 
-    <!-- Step 1: Login Screen -->
+    <!-- Login -->
     <div id="setup-area">
-        <div style="text-align: center; margin-bottom: 10px;">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-            </svg>
-        </div>
-        <div class="input-group">
-            <label>Secret Room Password</label>
-            <input type="password" id="secret-key" placeholder="Enter password to join..." onkeypress="if(event.key === 'Enter') setupSecurity()">
-        </div>
-        <button onclick="setupSecurity()">Enter Chat</button>
+        <p style="color: #666; font-size: 0.8rem;">Enter the exact access key to unlock historical & live comms.</p>
+        <input type="password" id="secret-key" placeholder="Enter Access Key...">
+        <button onclick="setupSecurity()">Decrypt Room</button>
     </div>
 
-    <!-- Step 2: Chat Screen -->
+    <!-- Chat -->
     <div id="chat-area">
         <div id="chat-box"></div>
         <div class="input-area">
-            <input type="text" id="message" placeholder="Message..." autocomplete="off" onkeypress="if(event.key === 'Enter') sendMessage()">
-            <button onclick="sendMessage()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-            </button>
+            <input type="file" id="file-input" accept="image/*,video/*" onchange="handleFileUpload(event)">
+            <button class="file-upload-btn" onclick="document.getElementById('file-input').click()">📎</button>
+            <input type="text" id="message" placeholder="Type..." autocomplete="off" onkeypress="if(event.key === 'Enter') sendMessage()">
+            <button onclick="sendMessage()">Send</button>
         </div>
     </div>
 </div>
@@ -129,33 +128,37 @@ const frontendHTML = `
     const socket = io();
     let cryptoKey = null;
 
-    // --- Web Crypto API Functions ---
+    // --- Anti-Screenshot / Privacy feature ---
+    // Jab user dusra app kholega, chat blur ho jayegi
+    window.addEventListener('blur', () => {
+        if(cryptoKey) document.getElementById('app').classList.add('blur-mode');
+    });
+    window.addEventListener('focus', () => {
+        document.getElementById('app').classList.remove('blur-mode');
+    });
+
+    // --- Military Crypto ---
     async function deriveKey(password) {
         const enc = new TextEncoder();
-        const salt = enc.encode("Smooth-Secure-Salt-2026"); 
-        const keyMaterial = await window.crypto.subtle.importKey(
-            "raw", enc.encode(password), {name: "PBKDF2"}, false, ["deriveKey"]
-        );
-        return window.crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
-            keyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
-        );
+        const salt = enc.encode("Secret-Room-X-2026"); 
+        const keyMaterial = await window.crypto.subtle.importKey("raw", enc.encode(password), {name: "PBKDF2"}, false, ["deriveKey"]);
+        return window.crypto.subtle.deriveKey({ name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" }, keyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     }
 
-    async function encryptMessage(text, key) {
+    async function encryptData(text) {
         const enc = new TextEncoder();
         const iv = window.crypto.getRandomValues(new Uint8Array(12)); 
-        const encrypted = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, enc.encode(text));
+        const encrypted = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, cryptoKey, enc.encode(text));
         const combined = new Uint8Array(iv.length + encrypted.byteLength);
         combined.set(iv, 0); combined.set(new Uint8Array(encrypted), iv.length);
         return btoa(String.fromCharCode(...combined));
     }
 
-    async function decryptMessage(base64Str, key) {
+    async function decryptData(base64Str) {
         const combined = new Uint8Array(atob(base64Str).split('').map(c => c.charCodeAt(0)));
         const iv = combined.slice(0, 12); 
         const data = combined.slice(12);
-        const decrypted = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, key, data);
+        const decrypted = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, cryptoKey, data);
         return new TextDecoder().decode(decrypted);
     }
 
@@ -166,48 +169,95 @@ const frontendHTML = `
         
         try {
             cryptoKey = await deriveKey(password);
-            
-            // UI Switch Smoothly
             document.getElementById('setup-area').style.display = 'none';
             document.getElementById('chat-area').style.display = 'flex';
             
-            // Update Header Status
-            document.getElementById('status-dot').classList.add('safe');
-            document.getElementById('status-text').innerText = 'End-to-End Encrypted';
+            displayMessage("System", "Syncing historical data...", 'system-msg');
             
-            displayMessage("System", "Chat secured. Only users with the same password can read messages.", 'system-msg');
-            setTimeout(() => document.getElementById('message').focus(), 100);
+            // Server se purani history maang rahe hain
+            socket.emit('request_history');
         } catch(e) {
-            alert("Security Error! Make sure you are using localhost or https://");
+            alert("Security Error!");
         }
     }
 
+    // Send Text Message
     async function sendMessage() {
         const msgInput = document.getElementById('message');
         const msg = msgInput.value;
         if(msg.trim() === '' || !cryptoKey) return;
 
         try {
-            const encryptedCiphertext = await encryptMessage(msg, cryptoKey);
-            socket.emit('secure_payload', encryptedCiphertext);
+            const encrypted = await encryptData(msg);
+            socket.emit('secure_payload', encrypted);
             displayMessage("You", msg, 'my-msg');
             msgInput.value = '';
-        } catch(e) { console.error("Encryption failed", e); }
+        } catch(e) {}
     }
 
-    socket.on('secure_payload', async (encryptedCiphertext) => {
+    // Send Photo/Video
+    function handleFileUpload(event) {
+        const file = event.target.files[0];
+        if(!file) return;
+
+        // Size check (Max 50MB limit lagayi hai taaki browser crash na ho)
+        if(file.size > 50000000) return alert("File size must be under 50MB for secure encryption.");
+
+        displayMessage("System", "Encrypting and uploading media... please wait.", 'system-msg');
+
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+            const dataUrl = e.target.result; // data:image/png;base64,....
+            try {
+                const encrypted = await encryptData(dataUrl);
+                socket.emit('secure_payload', encrypted);
+                displayMessage("You", dataUrl, 'my-msg');
+            } catch(error) {
+                alert("Media encryption failed!");
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // Listeners
+    socket.on('secure_payload', async (encryptedPayload) => {
         if(!cryptoKey) return; 
         try {
-            const originalText = await decryptMessage(encryptedCiphertext, cryptoKey);
-            displayMessage("Friend", originalText, 'friend-msg');
-        } catch(e) {
-            displayMessage("System", "⚠️ Someone sent a message with a wrong password.", 'system-msg');
-        }
+            const decryptedMsg = await decryptData(encryptedPayload);
+            displayMessage("Ghost", decryptedMsg, 'friend-msg');
+        } catch(e) { /* Ignore wrong passwords silently */ }
     });
 
+    socket.on('chat_history', async (historyArray) => {
+        if(!cryptoKey) return;
+        document.getElementById('chat-box').innerHTML = ''; // clear loading msg
+        let count = 0;
+        
+        for(let encryptedPayload of historyArray) {
+            try {
+                const decryptedMsg = await decryptData(encryptedPayload);
+                displayMessage("Ghost", decryptedMsg, 'friend-msg');
+                count++;
+            } catch(e) { /* Unreadable by this password */ }
+        }
+        displayMessage("System", count + " messages decrypted from offline storage.", 'system-msg');
+    });
+
+    // Display Logic
     function displayMessage(sender, msg, className) {
         const chatBox = document.getElementById('chat-box');
-        let content = sender === "System" ? msg : msg;
+        let content = '';
+
+        // Check if message is Image or Video Base64
+        if(msg.startsWith('data:image')) {
+            content = \`<img src="\${msg}">\`;
+        } else if(msg.startsWith('data:video')) {
+            content = \`<video src="\${msg}" controls></video>\`;
+        } else {
+            // Normal Text (XSS bachane ke liye)
+            content = msg.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
         chatBox.innerHTML += "<div class='msg " + className + "'>" + content + "</div>";
         chatBox.scrollTop = chatBox.scrollHeight;
     }
@@ -217,21 +267,34 @@ const frontendHTML = `
 `;
 
 // ==========================================
-// 2. BACKEND
+// 2. BACKEND (Offline Sync Logic)
 // ==========================================
 app.get('/', (req, res) => {
     res.send(frontendHTML);
 });
 
 io.on('connection', (socket) => {
-    console.log('User connected');
+    
+    // Jab naya user password daalkar online aata hai
+    socket.on('request_history', () => {
+        // Usko pura purana encrypted database bhej do
+        socket.emit('chat_history', messageHistory);
+    });
+
     socket.on('secure_payload', (payload) => {
+        // Message server pe save ho gaya (Encrypted form me hi, safe hai)
+        messageHistory.push(payload);
+        
+        // Memory bachane ke liye sirf last 100 messages hi store rakhenge
+        if(messageHistory.length > 100) messageHistory.shift(); 
+        
+        // Dusre active users ko bhej do
         socket.broadcast.emit('secure_payload', payload);
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log("✅ Premium Smooth E2E Chat Running!");
-    console.log(`👉 Open: http://localhost:${PORT}`);
+    console.log("✅ Secret Room E2E Chat is LIVE!");
+    console.log(`👉 Access URL: http://localhost:${PORT}`);
 });
