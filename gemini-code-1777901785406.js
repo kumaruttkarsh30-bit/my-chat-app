@@ -2,19 +2,39 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 
-// maxHttpBufferSize badha diya hai taaki 50MB tak ki Photos/Videos ja sakein
+// 50MB tak ki Photos/Videos ke liye size bada diya hai
 const io = new Server(server, { maxHttpBufferSize: 5e7 }); 
 
-// Server encrypted messages ko store karega (Offline messaging ke liye)
-// Note: Server ko sirf gibberish dikhega, password ke bina wo kuch nahi padh sakta.
+// ==========================================
+// DATABASE LOGIC (Permanent Storage)
+// ==========================================
+const dbFile = path.join(__dirname, 'secure_db.json');
+
+// File se purani chat history load karna (agar hai toh)
 let messageHistory = [];
+if (fs.existsSync(dbFile)) {
+    try {
+        const data = fs.readFileSync(dbFile, 'utf8');
+        messageHistory = JSON.parse(data);
+    } catch (e) {
+        console.log("Database read error, starting fresh.");
+        messageHistory = [];
+    }
+}
+
+// Jab naya message aaye toh file me permanently save karna
+function saveDatabase() {
+    fs.writeFileSync(dbFile, JSON.stringify(messageHistory));
+}
 
 // ==========================================
-// 1. FRONTEND: Secret Room RGB UI + Media + Offline Sync
+// 1. FRONTEND: UI + Permanent Storage Logic
 // ==========================================
 const frontendHTML = `
 <!DOCTYPE html>
@@ -22,21 +42,15 @@ const frontendHTML = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secret E2EE Room</title>
+    <title>Permanent Secret Room</title>
     <script src="/socket.io/socket.io.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --bg-dark: #050505;
-            --room-dark: #0a0a0a;
-            --text-main: #e0e0e0;
-            --accent: #222;
-        }
+        :root { --bg-dark: #050505; --room-dark: #0a0a0a; --text-main: #e0e0e0; }
         * { box-sizing: border-box; }
         body {
             font-family: 'Space Mono', monospace; background-color: var(--bg-dark); color: var(--text-main);
-            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; padding: 10px;
-            overflow: hidden;
+            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; padding: 10px; overflow: hidden;
         }
 
         /* RGB Glowing Secret Room Effect */
@@ -53,18 +67,24 @@ const frontendHTML = `
             border: 1px solid #333; animation: rgbGlow 6s infinite alternate; transition: filter 0.3s;
         }
 
-        /* Anti-Snoop Blur */
         .blur-mode { filter: blur(15px) grayscale(100%); pointer-events: none; }
 
         .header {
             padding: 15px; text-align: center; border-bottom: 1px solid #222; background: #000;
+            display: flex; justify-content: space-between; align-items: center;
         }
+        .badge-container { display: flex; flex-direction: column; align-items: flex-start; }
         .badge {
-            font-size: 0.65rem; color: #00ff00; border: 1px solid #00ff00; padding: 2px 6px;
-            border-radius: 4px; display: inline-block; margin-bottom: 5px; text-transform: uppercase;
-            letter-spacing: 1px;
+            font-size: 0.60rem; color: #00ff00; border: 1px solid #00ff00; padding: 2px 6px;
+            border-radius: 4px; display: inline-block; text-transform: uppercase; letter-spacing: 1px;
         }
-        .header h2 { margin: 0; font-size: 1.1rem; color: #fff; font-weight: normal; }
+        .header h2 { margin: 5px 0 0 0; font-size: 1.1rem; color: #fff; font-weight: normal; }
+        
+        .delete-btn {
+            background: #2a0000; color: #ff4444; border: 1px solid #ff0000; padding: 6px 10px;
+            border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-family: 'Space Mono', monospace; display: none;
+        }
+        .delete-btn:hover { background: #ff0000; color: #fff; }
 
         #setup-area { padding: 40px 20px; text-align: center; display: flex; flex-direction: column; gap: 20px; flex: 1; justify-content: center; }
         input[type="password"], input[type="text"] {
@@ -72,11 +92,11 @@ const frontendHTML = `
             background: #000; color: #00ff00; font-family: 'Space Mono', monospace; outline: none;
         }
         input:focus { border-color: #555; }
-        button {
+        button.action-btn {
             padding: 15px; border-radius: 8px; border: 1px solid #444; background: #111; color: #fff;
             cursor: pointer; font-family: 'Space Mono', monospace; transition: 0.3s;
         }
-        button:hover { background: #333; }
+        button.action-btn:hover { background: #333; }
 
         #chat-area { display: none; flex-direction: column; flex: 1; overflow: hidden; }
         #chat-box { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
@@ -84,16 +104,15 @@ const frontendHTML = `
         .msg { padding: 10px 15px; border-radius: 8px; max-width: 85%; font-size: 0.9rem; word-wrap: break-word; }
         .my-msg { background: #1a1a1a; align-self: flex-end; border: 1px solid #333; border-right: 3px solid #00ff00; }
         .friend-msg { background: #0f0f0f; align-self: flex-start; border: 1px solid #333; border-left: 3px solid #0015ff; }
-        .system-msg { color: #666; font-size: 0.75rem; align-self: center; text-align: center; }
+        .system-msg { color: #666; font-size: 0.75rem; align-self: center; text-align: center; background: #111; padding: 4px 10px; border-radius: 10px;}
 
-        /* Media Styling */
         .msg img, .msg video { max-width: 100%; border-radius: 4px; margin-top: 5px; border: 1px solid #333; }
 
         .input-area { padding: 10px; background: #000; border-top: 1px solid #222; display: flex; gap: 8px; align-items: center; }
         .input-area input[type="text"] { flex: 1; margin: 0; padding: 12px; }
         
         .file-upload-btn { background: transparent; border: none; font-size: 1.5rem; cursor: pointer; padding: 0 5px; color: #888; }
-        .file-upload-btn:hover { color: #fff; background: transparent;}
+        .file-upload-btn:hover { color: #fff; }
         #file-input { display: none; }
     </style>
 </head>
@@ -101,15 +120,18 @@ const frontendHTML = `
 
 <div class="app-container" id="app">
     <div class="header">
-        <div class="badge">🔒 End-to-End Encrypted</div>
-        <h2>Secret Room</h2>
+        <div class="badge-container">
+            <div class="badge">🔒 E2E Encrypted</div>
+            <h2>Secret Room</h2>
+        </div>
+        <button id="clear-btn" class="delete-btn" onclick="wipeRoom()">🗑️ Clear</button>
     </div>
 
     <!-- Login -->
     <div id="setup-area">
-        <p style="color: #666; font-size: 0.8rem;">Enter the exact access key to unlock historical & live comms.</p>
-        <input type="password" id="secret-key" placeholder="Enter Access Key...">
-        <button onclick="setupSecurity()">Decrypt Room</button>
+        <p style="color: #666; font-size: 0.8rem;">Permanent Storage Active.<br>Enter key to unlock historical comms.</p>
+        <input type="password" id="secret-key" placeholder="Enter Secret Room Key...">
+        <button class="action-btn" onclick="setupSecurity()">Decrypt Room</button>
     </div>
 
     <!-- Chat -->
@@ -118,8 +140,8 @@ const frontendHTML = `
         <div class="input-area">
             <input type="file" id="file-input" accept="image/*,video/*" onchange="handleFileUpload(event)">
             <button class="file-upload-btn" onclick="document.getElementById('file-input').click()">📎</button>
-            <input type="text" id="message" placeholder="Type..." autocomplete="off" onkeypress="if(event.key === 'Enter') sendMessage()">
-            <button onclick="sendMessage()">Send</button>
+            <input type="text" id="message" placeholder="Type secret message..." autocomplete="off" onkeypress="if(event.key === 'Enter') sendMessage()">
+            <button class="action-btn" style="padding: 12px 15px;" onclick="sendMessage()">Send</button>
         </div>
     </div>
 </div>
@@ -128,19 +150,14 @@ const frontendHTML = `
     const socket = io();
     let cryptoKey = null;
 
-    // --- Anti-Screenshot / Privacy feature ---
-    // Jab user dusra app kholega, chat blur ho jayegi
-    window.addEventListener('blur', () => {
-        if(cryptoKey) document.getElementById('app').classList.add('blur-mode');
-    });
-    window.addEventListener('focus', () => {
-        document.getElementById('app').classList.remove('blur-mode');
-    });
+    // --- Anti-Screenshot ---
+    window.addEventListener('blur', () => { if(cryptoKey) document.getElementById('app').classList.add('blur-mode'); });
+    window.addEventListener('focus', () => { document.getElementById('app').classList.remove('blur-mode'); });
 
     // --- Military Crypto ---
     async function deriveKey(password) {
         const enc = new TextEncoder();
-        const salt = enc.encode("Secret-Room-X-2026"); 
+        const salt = enc.encode("Permanent-Secret-Room-X"); 
         const keyMaterial = await window.crypto.subtle.importKey("raw", enc.encode(password), {name: "PBKDF2"}, false, ["deriveKey"]);
         return window.crypto.subtle.deriveKey({ name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" }, keyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     }
@@ -171,17 +188,13 @@ const frontendHTML = `
             cryptoKey = await deriveKey(password);
             document.getElementById('setup-area').style.display = 'none';
             document.getElementById('chat-area').style.display = 'flex';
+            document.getElementById('clear-btn').style.display = 'block';
             
-            displayMessage("System", "Syncing historical data...", 'system-msg');
-            
-            // Server se purani history maang rahe hain
             socket.emit('request_history');
-        } catch(e) {
-            alert("Security Error!");
-        }
+        } catch(e) { alert("Security Error!"); }
     }
 
-    // Send Text Message
+    // Send Message
     async function sendMessage() {
         const msgInput = document.getElementById('message');
         const msg = msgInput.value;
@@ -195,28 +208,29 @@ const frontendHTML = `
         } catch(e) {}
     }
 
-    // Send Photo/Video
+    // File Upload
     function handleFileUpload(event) {
         const file = event.target.files[0];
         if(!file) return;
+        if(file.size > 50000000) return alert("File max size is 50MB.");
 
-        // Size check (Max 50MB limit lagayi hai taaki browser crash na ho)
-        if(file.size > 50000000) return alert("File size must be under 50MB for secure encryption.");
-
-        displayMessage("System", "Encrypting and uploading media... please wait.", 'system-msg');
-
+        displayMessage("System", "Encrypting media to permanent storage...", 'system-msg');
         const reader = new FileReader();
         reader.onload = async function(e) {
-            const dataUrl = e.target.result; // data:image/png;base64,....
             try {
-                const encrypted = await encryptData(dataUrl);
+                const encrypted = await encryptData(e.target.result);
                 socket.emit('secure_payload', encrypted);
-                displayMessage("You", dataUrl, 'my-msg');
-            } catch(error) {
-                alert("Media encryption failed!");
-            }
+                displayMessage("You", e.target.result, 'my-msg');
+            } catch(error) { alert("Encryption failed!"); }
         };
         reader.readAsDataURL(file);
+    }
+
+    // Wipe Room (Permanent Delete)
+    function wipeRoom() {
+        if(confirm("DANGER: This will permanently delete the entire chat history for both of you. Are you sure?")) {
+            socket.emit('clear_database');
+        }
     }
 
     // Listeners
@@ -225,38 +239,35 @@ const frontendHTML = `
         try {
             const decryptedMsg = await decryptData(encryptedPayload);
             displayMessage("Ghost", decryptedMsg, 'friend-msg');
-        } catch(e) { /* Ignore wrong passwords silently */ }
+        } catch(e) { }
     });
 
     socket.on('chat_history', async (historyArray) => {
         if(!cryptoKey) return;
-        document.getElementById('chat-box').innerHTML = ''; // clear loading msg
+        document.getElementById('chat-box').innerHTML = ''; 
         let count = 0;
-        
         for(let encryptedPayload of historyArray) {
             try {
                 const decryptedMsg = await decryptData(encryptedPayload);
                 displayMessage("Ghost", decryptedMsg, 'friend-msg');
                 count++;
-            } catch(e) { /* Unreadable by this password */ }
+            } catch(e) { }
         }
-        displayMessage("System", count + " messages decrypted from offline storage.", 'system-msg');
+        displayMessage("System", count > 0 ? "Historical data loaded." : "Room is empty.", 'system-msg');
     });
 
-    // Display Logic
+    socket.on('room_wiped', () => {
+        document.getElementById('chat-box').innerHTML = '';
+        displayMessage("System", "🚨 Room history has been permanently wiped.", 'system-msg');
+    });
+
+    // Display
     function displayMessage(sender, msg, className) {
         const chatBox = document.getElementById('chat-box');
         let content = '';
-
-        // Check if message is Image or Video Base64
-        if(msg.startsWith('data:image')) {
-            content = \`<img src="\${msg}">\`;
-        } else if(msg.startsWith('data:video')) {
-            content = \`<video src="\${msg}" controls></video>\`;
-        } else {
-            // Normal Text (XSS bachane ke liye)
-            content = msg.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
+        if(msg.startsWith('data:image')) content = \`<img src="\${msg}">\`;
+        else if(msg.startsWith('data:video')) content = \`<video src="\${msg}" controls></video>\`;
+        else content = msg.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
         chatBox.innerHTML += "<div class='msg " + className + "'>" + content + "</div>";
         chatBox.scrollTop = chatBox.scrollHeight;
@@ -267,34 +278,44 @@ const frontendHTML = `
 `;
 
 // ==========================================
-// 2. BACKEND (Offline Sync Logic)
+// 2. BACKEND & OFFLINE SYNC
 // ==========================================
-app.get('/', (req, res) => {
-    res.send(frontendHTML);
-});
+app.get('/', (req, res) => { res.send(frontendHTML); });
 
 io.on('connection', (socket) => {
     
-    // Jab naya user password daalkar online aata hai
+    // User login karta hai toh use puri permanent history bhej do
     socket.on('request_history', () => {
-        // Usko pura purana encrypted database bhej do
         socket.emit('chat_history', messageHistory);
     });
 
+    // Naya message aane par
     socket.on('secure_payload', (payload) => {
-        // Message server pe save ho gaya (Encrypted form me hi, safe hai)
         messageHistory.push(payload);
         
-        // Memory bachane ke liye sirf last 100 messages hi store rakhenge
-        if(messageHistory.length > 100) messageHistory.shift(); 
+        // Storage bachane ke liye max 1000 messages permanent rakh rahe hain
+        if(messageHistory.length > 1000) messageHistory.shift(); 
         
-        // Dusre active users ko bhej do
+        // Data turant hard drive (file) me save kar do
+        saveDatabase();
+        
+        // Dusre active users ko forward karo
         socket.broadcast.emit('secure_payload', payload);
+    });
+
+    // Jab koi 'Clear' button dabaye
+    socket.on('clear_database', () => {
+        messageHistory = []; // Array clear
+        saveDatabase();      // File clear
+        io.emit('room_wiped'); // Sabki screen se gayab
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log("✅ Secret Room E2E Chat is LIVE!");
-    console.log(`👉 Access URL: http://localhost:${PORT}`);
+    console.log("===================================");
+    console.log("✅ Permanent E2E Secret Room Live!");
+    console.log(`👉 Database: ${dbFile}`);
+    console.log(`👉 URL: http://localhost:${PORT}`);
+    console.log("===================================");
 });
